@@ -31,14 +31,11 @@ import processing.app.Language;
 import processing.app.ui.Editor;
 import processing.app.ui.EditorButton;
 import processing.app.ui.EditorToolbar;
-import processing.mode.java.debug.Debugger;
 
 
 public class JavaToolbar extends EditorToolbar {
   JavaEditor jeditor;
 
-  EditorButton stepButton;
-  EditorButton continueButton;
   EditorButton liveButton;
   EditorButton arduinoButton;
 
@@ -49,89 +46,11 @@ public class JavaToolbar extends EditorToolbar {
   }
 
 
-  /**
-   * Check if 'debugger' is available and enabled.
-   */
-  private boolean isDebuggerArmed() {
-    // 'jeditor' not ready yet because this is called by super()
-    // 'debugger' also null during init
-    if (jeditor == null) {
-      return false;
-    }
-    return jeditor.isDebuggerEnabled();
-  }
-
-
   @Override
   public List<EditorButton> createButtons() {
-    final boolean debug = isDebuggerArmed();
-
     List<EditorButton> outgoing = new ArrayList<>();
 
-    final String runText = debug ?
-      Language.text("toolbar.debug") : Language.text("toolbar.run");
-    runButton = new EditorButton(this,
-                                 "/lib/toolbar/run",
-                                 runText,
-                                 Language.text("toolbar.present")) {
-      @Override
-      public void actionPerformed(ActionEvent e) {
-        handleRun(e.getModifiers());
-      }
-    };
-    outgoing.add(runButton);
-
-    if (debug) {
-      stepButton = new EditorButton(this,
-                                    "/lib/toolbar/step",
-                                    Language.text("menu.debug.step"),
-                                    Language.text("menu.debug.step_into"),
-                                    Language.text("menu.debug.step_out")) {
-        @Override
-        public void actionPerformed(ActionEvent e) {
-          Debugger d = jeditor.getDebugger();
-
-          final int modifiers = e.getModifiers() &
-            (ActionEvent.SHIFT_MASK | ActionEvent.ALT_MASK);
-          if (modifiers == 0) {
-            d.stepOver();
-          } else if ((modifiers & ActionEvent.SHIFT_MASK) != 0) {
-            d.stepInto();
-          } else if ((modifiers & ActionEvent.ALT_MASK) != 0) {
-            d.stepOut();
-          }
-        }
-      };
-      outgoing.add(stepButton);
-
-      continueButton = new EditorButton(this,
-                                        "/lib/toolbar/continue",
-                                        Language.text("menu.debug.continue")) {
-        @Override
-        public void actionPerformed(ActionEvent e) {
-          //jeditor.handleContinue();
-          jeditor.getDebugger().continueDebug();
-        }
-      };
-      outgoing.add(continueButton);
-    }
-
-    stopButton = new EditorButton(this,
-                                  "/lib/toolbar/stop",
-                                  Language.text("toolbar.stop")) {
-      @Override
-      public void actionPerformed(ActionEvent e) {
-        handleStop();
-      }
-    };
-    outgoing.add(stopButton);
-
-    return outgoing;
-  }
-
-
-  @Override
-  public void addModeButtons(Box box, JLabel label) {
+    // Live Preview as the primary button (top-left)
     liveButton =
       new EditorButton(this, "/lib/toolbar/live",
                        "Live Preview") {
@@ -141,9 +60,9 @@ public class JavaToolbar extends EditorToolbar {
         setSelected(jeditor.isLiveMode());
       }
     };
-    box.add(liveButton);
-    addGap(box);
+    outgoing.add(liveButton);
 
+    // Arduino button next to Live
     arduinoButton =
       new EditorButton(this, "/lib/toolbar/arduino",
                        "Arduino") {
@@ -152,23 +71,36 @@ public class JavaToolbar extends EditorToolbar {
         jeditor.showArduinoPortMenu(arduinoButton);
       }
     };
-    box.add(arduinoButton);
-    addGap(box);
+    outgoing.add(arduinoButton);
 
-    EditorButton debugButton =
-      new EditorButton(this, "/lib/toolbar/debug",
-                       Language.text("toolbar.debug")) {
+    // Keep run/stop buttons as hidden references (other code calls activateRun/activateStop)
+    runButton = new EditorButton(this,
+                                 "/lib/toolbar/run",
+                                 Language.text("toolbar.run")) {
       @Override
       public void actionPerformed(ActionEvent e) {
-        jeditor.toggleDebug();
+        handleRun(e.getModifiers());
       }
     };
+    runButton.setVisible(false);
 
-    if (isDebuggerArmed()) {
-      debugButton.setSelected(true);
-    }
-    box.add(debugButton);
-    addGap(box);
+    stopButton = new EditorButton(this,
+                                  "/lib/toolbar/stop",
+                                  Language.text("toolbar.stop")) {
+      @Override
+      public void actionPerformed(ActionEvent e) {
+        handleStop();
+      }
+    };
+    stopButton.setVisible(false);
+
+    return outgoing;
+  }
+
+
+  @Override
+  public void addModeButtons(Box box, JLabel label) {
+    // No mode buttons on the right — Live and Arduino are primary buttons now
   }
 
 
@@ -186,30 +118,6 @@ public class JavaToolbar extends EditorToolbar {
   @Override
   public void handleStop() {
     jeditor.handleStop();
-  }
-
-
-  public void activateContinue() {
-    continueButton.setSelected(true);
-    repaint();
-  }
-
-
-  protected void deactivateContinue() {
-    continueButton.setSelected(false);
-    repaint();
-  }
-
-
-  protected void activateStep() {
-    stepButton.setSelected(true);
-    repaint();
-  }
-
-
-  protected void deactivateStep() {
-    stepButton.setSelected(false);
-    repaint();
   }
 
 

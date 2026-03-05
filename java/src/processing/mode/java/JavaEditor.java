@@ -2225,24 +2225,13 @@ public class JavaEditor extends Editor {
    */
 
 
-  public void activateContinue() {
-    ((JavaToolbar) toolbar).activateContinue();
-  }
+  public void activateContinue() { }
 
+  public void deactivateContinue() { }
 
-  public void deactivateContinue() {
-    ((JavaToolbar) toolbar).deactivateContinue();
-  }
+  public void activateStep() { }
 
-
-  public void activateStep() {
-    ((JavaToolbar) toolbar).activateStep();
-  }
-
-
-  public void deactivateStep() {
-    ((JavaToolbar) toolbar).deactivateStep();
-  }
+  public void deactivateStep() { }
 
 
   public void toggleDebug() {

@@ -17,6 +17,8 @@ import java.io.IOException;
 class JSerialCommTransport implements TransportInterface {
 
   private static final int BAUD_RATE = 57600;
+  // Firmata protocol version response starts with 0xF9
+  private static final byte FIRMATA_VERSION_REPORT = (byte) 0xF9;
 
   private final SerialPort port;
   private Parser parser;
@@ -35,17 +37,11 @@ class JSerialCommTransport implements TransportInterface {
       throw new IOException("Cannot open port " + port.getSystemPortName());
     }
 
-    // Wait for Arduino bootloader to finish after port open triggers DTR reset.
-    // Uno bootloader ~1s, Mega ~1.5s. Then flush any garbage bytes.
-    try {
-      Thread.sleep(1500);
-    } catch (InterruptedException ignored) {
-      Thread.currentThread().interrupt();
-    }
-    if (port.bytesAvailable() > 0) {
-      byte[] discard = new byte[port.bytesAvailable()];
-      port.readBytes(discard, discard.length);
-    }
+    // Opening the port triggers a DTR reset on the Arduino.
+    // Wait for the bootloader to finish, but use adaptive timing:
+    // poll for Firmata data arriving (which means StandardFirmata is ready)
+    // rather than always waiting the worst-case time.
+    waitForFirmata();
 
     port.addDataListener(new SerialPortDataListener() {
       @Override
@@ -68,6 +64,57 @@ class JSerialCommTransport implements TransportInterface {
       }
     });
   }
+
+
+  /**
+   * Wait for the Arduino bootloader to finish and StandardFirmata to start.
+   * Polls for incoming data every 100ms instead of blindly sleeping.
+   * Most boards are ready in 500-1200ms; times out at 2000ms.
+   */
+  private void waitForFirmata() {
+    long deadline = System.currentTimeMillis() + 2000;
+    boolean gotData = false;
+
+    try {
+      // Short initial wait for bootloader to start
+      Thread.sleep(300);
+
+      while (System.currentTimeMillis() < deadline) {
+        int available = port.bytesAvailable();
+        if (available > 0) {
+          // Data arrived — check if it looks like Firmata
+          byte[] peek = new byte[available];
+          port.readBytes(peek, available);
+          for (byte b : peek) {
+            if (b == FIRMATA_VERSION_REPORT) {
+              gotData = true;
+              break;
+            }
+          }
+          if (gotData) {
+            // Firmata is talking — flush remaining bootloader garbage
+            Thread.sleep(50);
+            if (port.bytesAvailable() > 0) {
+              byte[] discard = new byte[port.bytesAvailable()];
+              port.readBytes(discard, discard.length);
+            }
+            return;
+          }
+          // Got data but not Firmata — bootloader is still running, keep waiting
+        }
+        Thread.sleep(100);
+      }
+    } catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
+    }
+
+    // Timeout: flush whatever is in the buffer and hope for the best
+    if (port.bytesAvailable() > 0) {
+      byte[] discard = new byte[port.bytesAvailable()];
+      port.readBytes(discard, discard.length);
+    }
+  }
+
 
   @Override
   public void stop() throws IOException {
