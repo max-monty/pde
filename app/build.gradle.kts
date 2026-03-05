@@ -149,6 +149,24 @@ tasks.compileJava{
     options.encoding = "UTF-8"
 }
 
+// Debug task: run PDE with stdout/stderr forwarded to console
+tasks.register("run-debug") {
+    group = "processing"
+    description = "Run Processing PDE with stdout/stderr visible"
+    val run = tasks.named<JavaExec>("run").get()
+    run.standardOutput = System.out
+    run.errorOutput = System.err
+    dependsOn(run)
+}
+
+tasks.register("printClasspath") {
+    group = "processing"
+    val run = tasks.named<JavaExec>("run").get()
+    doLast {
+        println(run.classpath.asPath)
+    }
+}
+
 tasks.register("lsp-develop"){
     group = "processing"
     // This task is used to run the LSP server when developing the LSP server itself

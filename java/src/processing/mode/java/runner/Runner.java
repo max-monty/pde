@@ -323,6 +323,12 @@ public class Runner implements MessageConsumer {
     // Surprised this wasn't here before; added for 3.2.1
     params.append("-Djna.nosys=true");
 
+    // Pass Arduino port selection from the IDE to the sketch
+    String arduinoPort = Preferences.get("arduino.port");
+    if (arduinoPort != null && !arduinoPort.isEmpty()) {
+      params.append("-Dprocessing.arduino.port=" + arduinoPort);
+    }
+
     // Added for 3.2.1, was still using the default ext.dirs in the PDE
     // java.ext.dirs no longer supported in Java 11
     /*try {

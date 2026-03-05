@@ -88,7 +88,7 @@ legacyLibraries.forEach { library ->
     }
 }
 
-val libraries = arrayOf("dxf", "io", "net", "pdf", "serial", "svg")
+val libraries = arrayOf("dxf", "io", "net", "pdf", "serial", "svg", "arduino")
 
 libraries.forEach { library ->
     val name = "create-$library-library"

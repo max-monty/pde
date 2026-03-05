@@ -33,6 +33,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -62,6 +66,10 @@ import processing.mode.java.tweak.ColorControlBox;
 import processing.mode.java.tweak.Handle;
 import processing.mode.java.tweak.SketchParser;
 import processing.mode.java.tweak.TweakClient;
+import processing.mode.java.livemode.LiveModeController;
+import processing.mode.java.livemode.LiveVariablePanel;
+import processing.mode.java.livemode.TimelinePanel;
+import processing.mode.java.livemode.VariableInspector;
 
 
 public class JavaEditor extends Editor {
@@ -96,6 +104,32 @@ public class JavaEditor extends Editor {
   static private final boolean SHOW_AST_VIEWER = false;
   private ASTViewer astViewer;
 
+  // Live Preview mode — auto-run sketch on code change
+  private volatile boolean liveMode = false;
+  private static final long LIVE_RELAUNCH_DELAY = 500; // ms after last keystroke
+  private final ScheduledExecutorService liveScheduler =
+    Executors.newSingleThreadScheduledExecutor(r -> {
+      Thread t = new Thread(r, "LivePreview");
+      t.setDaemon(true);
+      return t;
+    });
+  private volatile ScheduledFuture<?> scheduledLiveRelaunch = null;
+
+  // Timeline scrubbing and variable inspection
+  private TimelinePanel timelinePanel;
+  private LiveModeController liveModeController;
+  private VariableInspector variableInspector;
+  private int liveControlPort;
+  private int liveVarPort;
+
+  // Tweak hot-swap for live number scrubbing
+  private TweakClient liveTweakClient;
+  private List<List<Handle>> liveHandles;
+  volatile boolean suppressLiveRelaunch = false;
+
+  // Variable side panel for live mode
+  private LiveVariablePanel liveVariablePanel;
+
   /** P5 in decimal; if there are complaints, move to preferences.txt */
   static final int REFERENCE_PORT = 8053;
   // weird to link to a specific location like this, but it's versioned, so:
@@ -112,8 +146,95 @@ public class JavaEditor extends Editor {
 
     jmode = (JavaMode) mode;
 
+    // Add timeline panel below the main split pane
+    timelinePanel = new TimelinePanel();
+    timelinePanel.setTimelineListener(new TimelinePanel.TimelineListener() {
+      @Override
+      public void onPauseToggle(boolean paused) {
+        if (liveModeController != null) {
+          if (paused) liveModeController.sendPause();
+          else liveModeController.sendResume();
+        }
+      }
+      @Override
+      public void onStepForward() {
+        if (liveModeController != null) {
+          if (!timelinePanel.isPaused()) {
+            timelinePanel.setPaused(true);
+            liveModeController.sendPause();
+          }
+          liveModeController.sendStep();
+        }
+      }
+      @Override
+      public void onStepBackward() {
+        if (liveModeController != null) {
+          if (!timelinePanel.isPaused()) {
+            timelinePanel.setPaused(true);
+            liveModeController.sendPause();
+          }
+          liveModeController.sendStepBack();
+        }
+      }
+      @Override
+      public void onRestart() {
+        timelinePanel.reset();
+        doLiveRelaunch();
+      }
+    });
+    getContentPane().add(timelinePanel, java.awt.BorderLayout.SOUTH);
+
+    // Add collapsible variable panel to the right side of the text area
+    liveVariablePanel = new LiveVariablePanel();
+    Container textParent = textarea.getParent();
+    if (textParent instanceof JPanel editorPanel) {
+      editorPanel.remove(textarea);
+      JPanel textWithVars = new JPanel(new BorderLayout());
+      textWithVars.add(textarea, BorderLayout.CENTER);
+      textWithVars.add(liveVariablePanel, BorderLayout.EAST);
+      editorPanel.add(textWithVars, BorderLayout.CENTER);
+      editorPanel.revalidate();
+    }
+
     debugger = new Debugger(this);
     debugger.populateMenu(modeMenu);
+
+    // Add live mode menu item (Cmd+L / Ctrl+L)
+    modeMenu.addSeparator();
+    JMenuItem liveItem = Toolkit.newJMenuItem("Live Preview", 'L');
+    liveItem.addActionListener(e -> toggleLive());
+    modeMenu.add(liveItem);
+
+    // Add Arduino submenu
+    modeMenu.addSeparator();
+    JMenu arduinoMenu = new JMenu("Arduino");
+    JMenuItem selectPortItem = new JMenuItem("Select Port\u2026");
+    selectPortItem.addActionListener(e -> {
+      if (toolbar instanceof JavaToolbar jt) {
+        showArduinoPortMenu(jt);
+      }
+    });
+    arduinoMenu.add(selectPortItem);
+
+    JMenuItem autoDetectItem = new JMenuItem("Auto-detect");
+    autoDetectItem.addActionListener(e -> selectArduinoPort(null));
+    arduinoMenu.add(autoDetectItem);
+
+    arduinoMenu.addSeparator();
+
+    JMenuItem uploadFirmataItem = new JMenuItem("Upload StandardFirmata");
+    uploadFirmataItem.addActionListener(e -> uploadStandardFirmata());
+    arduinoMenu.add(uploadFirmataItem);
+
+    modeMenu.add(arduinoMenu);
+
+    // Restore Arduino button state from preferences
+    String savedPort = Preferences.get("arduino.port");
+    if (savedPort != null && !savedPort.isEmpty()) {
+      if (toolbar instanceof JavaToolbar jt) {
+        jt.setArduinoSelected(true);
+      }
+    }
 
     // set breakpoints from marker comments
     for (LineID lineID : stripBreakpointComments()) {
@@ -631,6 +752,653 @@ public class JavaEditor extends Editor {
     handleLaunch(false, true);
   }
 
+
+  // ---- Live Preview Mode ----
+
+  public boolean isLiveMode() {
+    return liveMode;
+  }
+
+  public void toggleLive() {
+    liveMode = !liveMode;
+    if (liveMode) {
+      statusNotice("Live Preview enabled");
+      // Reduce error checking delay for faster feedback
+      errorChecker.setDelay(300);
+
+      // Show timeline panel
+      timelinePanel.setVisible(true);
+      timelinePanel.reset();
+
+      // Allocate ports for communication with the sketch
+      liveControlPort = 0xD000 + (int)(Math.random() * 0x1000);
+      liveVarPort = 0xE000 + (int)(Math.random() * 0x1000);
+
+      // Start live mode controller for timeline
+      liveModeController = new LiveModeController(liveControlPort);
+      liveModeController.setFrameListener(frame -> {
+        EventQueue.invokeLater(() -> timelinePanel.updateFrame(frame));
+      });
+      liveModeController.start();
+
+      // Start variable inspector
+      variableInspector = new VariableInspector();
+      variableInspector.setListener(() -> {
+        EventQueue.invokeLater(() -> {
+          // Update the side panel with latest variable data
+          if (liveVariablePanel != null && liveVariablePanel.isVisible()) {
+            liveVariablePanel.setCurrentTab(getSketch().getCurrentCodeIndex());
+            liveVariablePanel.updateVariables();
+          }
+        });
+      });
+      variableInspector.start(liveVarPort);
+
+      // Wire variable inspector and controller to the side panel
+      liveVariablePanel.setInspector(variableInspector);
+      liveVariablePanel.setLiveModeController(liveModeController);
+      liveVariablePanel.setCurrentTab(getSketch().getCurrentCodeIndex());
+      liveVariablePanel.setVisible(true);
+
+      // Wire controller to painter for global variable scrubbing
+      if (getJavaTextArea() != null &&
+          getJavaTextArea().getPainter() instanceof JavaTextAreaPainter jtp) {
+        jtp.setLiveModeController(liveModeController);
+      }
+
+      // Set toolbar button state
+      if (toolbar instanceof JavaToolbar jt) {
+        jt.setLiveSelected(true);
+      }
+
+      // Launch the sketch with live mode code injection
+      doLiveLaunch();
+    } else {
+      statusNotice("Live Preview disabled");
+      disableLiveMode();
+    }
+    // Rebuild toolbar to update button state
+    toolbar.repaint();
+    // Revalidate layout for timeline panel visibility
+    revalidate();
+  }
+
+  /**
+   * Clean up all live mode resources. Called when disabling live mode.
+   */
+  private void disableLiveMode() {
+    liveMode = false;
+    errorChecker.setDelay(650);
+    timelinePanel.setVisible(false);
+
+    if (scheduledLiveRelaunch != null) {
+      scheduledLiveRelaunch.cancel(false);
+      scheduledLiveRelaunch = null;
+    }
+    // Stop the running sketch
+    try {
+      synchronized (runtimeLock) {
+        if (runtime != null) {
+          runtime.close();
+          runtime = null;
+        }
+      }
+    } catch (Exception e) {
+      // Ignore errors from stopping
+    }
+    toolbar.deactivateStop();
+    toolbar.deactivateRun();
+    if (liveModeController != null) {
+      liveModeController.stop();
+      liveModeController = null;
+    }
+    if (variableInspector != null) {
+      if (getJavaTextArea() != null &&
+          getJavaTextArea().getPainter() instanceof JavaTextAreaPainter jtp) {
+        jtp.setLiveHandles(null);
+      }
+      variableInspector.stop();
+      variableInspector = null;
+    }
+    // Hide variable panel
+    if (liveVariablePanel != null) {
+      liveVariablePanel.setInspector(null);
+      liveVariablePanel.setLiveModeController(null);
+      liveVariablePanel.setVisible(false);
+    }
+    // Clear controller from painter
+    if (getJavaTextArea() != null &&
+        getJavaTextArea().getPainter() instanceof JavaTextAreaPainter jtp) {
+      jtp.setLiveModeController(null);
+    }
+    // Clean up tweak client
+    if (liveTweakClient != null) {
+      liveTweakClient.shutdown();
+      liveTweakClient = null;
+    }
+    liveHandles = null;
+    // Sync toolbar button state
+    if (toolbar instanceof JavaToolbar jt) {
+      jt.setLiveSelected(false);
+    }
+    toolbar.repaint();
+    revalidate();
+  }
+
+  /**
+   * Schedule a debounced relaunch of the sketch for live preview mode.
+   * Called from sketchChanged() when live mode is active.
+   */
+  private void scheduleLiveRelaunch() {
+    if (scheduledLiveRelaunch != null) {
+      scheduledLiveRelaunch.cancel(false);
+    }
+    scheduledLiveRelaunch = liveScheduler.schedule(() -> {
+      if (!liveMode) return;
+
+      // Check if there are errors before relaunching
+      List<Problem> currentProblems = getProblems();
+      boolean hasErrors = currentProblems != null &&
+        currentProblems.stream().anyMatch(Problem::isError);
+      if (hasErrors) {
+        return; // Don't relaunch if there are compilation errors
+      }
+
+      EventQueue.invokeLater(() -> {
+        if (!liveMode) return;
+        // Stop and relaunch
+        doLiveRelaunch();
+      });
+    }, LIVE_RELAUNCH_DELAY, TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Launch the sketch with live mode code injection.
+   * Used for both the initial launch and relaunches. Must be called on EDT.
+   */
+  private void doLiveLaunch() {
+    // Ensure edits are stored
+    sketch.ensureExistence();
+    for (SketchCode sc : sketch.getCode()) {
+      if (sc.getDocument() != null) {
+        try {
+          sc.setProgram(sc.getDocumentText());
+        } catch (BadLocationException ignored) { }
+      }
+    }
+
+    // Clear old variable data
+    if (variableInspector != null) {
+      variableInspector.clear();
+    }
+
+    // Clean up previous tweak client
+    if (liveTweakClient != null) {
+      liveTweakClient.shutdown();
+      liveTweakClient = null;
+    }
+    liveHandles = null;
+
+    toolbar.activateRun();
+
+    // Build and launch on background thread with live mode code injection
+    new Thread(() -> {
+      try {
+        List<List<Handle>> outHandles = new ArrayList<>();
+        synchronized (runtimeLock) {
+          runtimeLaunchRequested = false;
+          RunnerListener listener = new RunnerListenerEdtAdapter(JavaEditor.this);
+          runtime = jmode.handleLiveLaunch(sketch, listener,
+                                           liveControlPort, liveVarPort,
+                                           outHandles);
+        }
+        // Wire up tweak client and handles for hot-swap scrubbing
+        if (!outHandles.isEmpty()) {
+          TweakClient tc = new TweakClient(liveControlPort);
+          for (List<Handle> list : outHandles) {
+            for (Handle h : list) {
+              h.setTweakClient(tc);
+            }
+          }
+          EventQueue.invokeLater(() -> {
+            liveTweakClient = tc;
+            liveHandles = outHandles;
+            // Pass handles to the painter for scrub mapping
+            if (getJavaTextArea().getPainter() instanceof JavaTextAreaPainter jtp) {
+              jtp.setLiveHandles(liveHandles);
+            }
+          });
+        }
+        // Send initial pings so the sketch learns the editor's reply port.
+        // The sketch captures the source port from the first received packet,
+        // which enables it to send frame count reports back to the editor.
+        for (int delay = 200; delay <= 1000; delay += 200) {
+          liveScheduler.schedule(() -> {
+            if (liveModeController != null) {
+              liveModeController.sendResume();
+            }
+          }, delay, TimeUnit.MILLISECONDS);
+        }
+      } catch (Exception e) {
+        EventQueue.invokeLater(() -> statusError(e));
+      }
+    }).start();
+  }
+
+  /**
+   * Stop the current sketch and relaunch it. Must be called on EDT.
+   */
+  private void doLiveRelaunch() {
+    // Stop the current runtime without clearing the console
+    try {
+      synchronized (runtimeLock) {
+        if (runtimeLaunchRequested) {
+          runtimeLaunchRequested = false;
+        }
+        if (runtime != null) {
+          runtime.close();
+          runtime = null;
+        }
+      }
+    } catch (Exception e) {
+      // Ignore errors from stopping
+    }
+
+    doLiveLaunch();
+  }
+
+  // ---- End Live Preview Mode ----
+
+
+  // ---- Arduino Integration ----
+
+  /**
+   * Show a popup menu with detected Arduino serial ports.
+   * Called when the Arduino toolbar button is clicked.
+   */
+  public void showArduinoPortMenu(java.awt.Component anchor) {
+    JPopupMenu menu = new JPopupMenu();
+    String currentPort = Preferences.get("arduino.port");
+
+    // Scan for ports using system commands
+    List<String> ports = detectSerialPorts();
+
+    if (ports.isEmpty()) {
+      JMenuItem noBoard = new JMenuItem("No Arduino detected");
+      noBoard.setEnabled(false);
+      menu.add(noBoard);
+    } else {
+      for (String port : ports) {
+        JMenuItem item = new JMenuItem(port);
+        if (port.equals(currentPort)) {
+          item.setText("\u2713 " + port);  // checkmark
+        }
+        item.addActionListener(e -> selectArduinoPort(port));
+        menu.add(item);
+      }
+    }
+
+    menu.addSeparator();
+
+    // Auto-detect option
+    JMenuItem autoItem = new JMenuItem("Auto-detect");
+    if (currentPort == null || currentPort.isEmpty()) {
+      autoItem.setText("\u2713 Auto-detect");
+    }
+    autoItem.addActionListener(e -> selectArduinoPort(null));
+    menu.add(autoItem);
+
+    // Manual port entry
+    JMenuItem manualItem = new JMenuItem("Enter port manually\u2026");
+    manualItem.addActionListener(e -> {
+      String input = (String) JOptionPane.showInputDialog(
+        this, "Serial port name:", "Arduino Port",
+        JOptionPane.PLAIN_MESSAGE, null, null, currentPort);
+      if (input != null && !input.trim().isEmpty()) {
+        selectArduinoPort(input.trim());
+      }
+    });
+    menu.add(manualItem);
+
+    menu.addSeparator();
+
+    // Rescan
+    JMenuItem rescanItem = new JMenuItem("Rescan ports");
+    rescanItem.addActionListener(e -> showArduinoPortMenu(anchor));
+    menu.add(rescanItem);
+
+    menu.show(anchor, 0, anchor.getHeight());
+  }
+
+
+  /**
+   * Set the selected Arduino port and update toolbar state.
+   */
+  private void selectArduinoPort(String port) {
+    if (port == null || port.isEmpty()) {
+      Preferences.set("arduino.port", "");
+      statusNotice("Arduino: auto-detect mode");
+    } else {
+      Preferences.set("arduino.port", port);
+      statusNotice("Arduino port: " + port);
+    }
+    // Update toolbar button visual state
+    if (toolbar instanceof JavaToolbar jt) {
+      jt.setArduinoSelected(port != null && !port.isEmpty());
+    }
+  }
+
+
+  /**
+   * Detect serial ports likely to be Arduino boards.
+   * Uses system commands to find USB serial devices.
+   */
+  private List<String> detectSerialPorts() {
+    List<String> ports = new ArrayList<>();
+    try {
+      String os = System.getProperty("os.name").toLowerCase();
+      ProcessBuilder pb;
+      if (os.contains("mac")) {
+        pb = new ProcessBuilder("bash", "-c",
+          "ls /dev/tty.usb* /dev/cu.usb* 2>/dev/null");
+      } else if (os.contains("linux")) {
+        pb = new ProcessBuilder("bash", "-c",
+          "ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null");
+      } else {
+        // Windows — list COM ports from registry
+        pb = new ProcessBuilder("cmd", "/c",
+          "reg query HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM 2>nul");
+      }
+      pb.redirectErrorStream(true);
+      Process p = pb.start();
+      try (var reader = new java.io.BufferedReader(
+             new java.io.InputStreamReader(p.getInputStream()))) {
+        String line;
+        while ((line = reader.readLine()) != null) {
+          line = line.trim();
+          if (!line.isEmpty()) {
+            if (os.contains("win")) {
+              // Windows reg output: "    \Device\Serial0    REG_SZ    COM3"
+              int comIdx = line.lastIndexOf("COM");
+              if (comIdx >= 0) {
+                ports.add(line.substring(comIdx).trim());
+              }
+            } else {
+              ports.add(line);
+            }
+          }
+        }
+      }
+      p.waitFor();
+    } catch (Exception e) {
+      // Silently fail — will show "No Arduino detected"
+    }
+    return ports;
+  }
+
+  /**
+   * Upload StandardFirmata to the connected Arduino board.
+   * Uses arduino-cli, downloading it if necessary.
+   */
+  private void uploadStandardFirmata() {
+    // Determine port
+    String port = Preferences.get("arduino.port");
+    if (port == null || port.isEmpty()) {
+      List<String> ports = detectSerialPorts();
+      if (ports.isEmpty()) {
+        statusError("No Arduino board detected. Plug in a board and try again.");
+        return;
+      }
+      port = ports.get(0);
+    }
+
+    final String targetPort = port;
+    statusNotice("Uploading StandardFirmata to " + targetPort + "...");
+
+    // Stop any running sketch that might be holding the serial port open
+    try {
+      synchronized (runtimeLock) {
+        if (runtime != null) {
+          runtime.close();
+          runtime = null;
+        }
+      }
+    } catch (Exception ex) { /* ignore */ }
+
+    // Run in background thread to avoid blocking EDT
+    new Thread(() -> {
+      try {
+        // Find or get arduino-cli
+        String cli = findArduinoCli();
+        if (cli == null) {
+          cli = installArduinoCli();
+        }
+        if (cli == null) {
+          EventQueue.invokeLater(() ->
+            statusError("Could not find or install arduino-cli."));
+          return;
+        }
+
+        // Install Arduino AVR core and Firmata library
+        final String cliPath = cli;
+        runArduinoCommand(cliPath, "core", "install", "arduino:avr");
+        runArduinoCommand(cliPath, "lib", "install", "Firmata");
+        runArduinoCommand(cliPath, "lib", "install", "Servo");
+
+        // Find the StandardFirmata example sketch
+        String firmataPath = findFirmataExample();
+        if (firmataPath == null) {
+          EventQueue.invokeLater(() ->
+            statusError("StandardFirmata example not found. Install the Firmata library."));
+          return;
+        }
+
+        // Detect board type
+        String fqbn = detectBoardFqbn(cliPath, targetPort);
+        System.out.println("[Arduino] Detected board: " + fqbn);
+
+        // Compile and upload
+        System.out.println("[Arduino] Uploading StandardFirmata from: " + firmataPath);
+        String[] result = runArduinoCommandCapture(cliPath,
+          "compile", "--upload",
+          "-b", fqbn,
+          "-p", targetPort,
+          firmataPath);
+
+        if (result[1].contains("Error") || result[1].contains("error")) {
+          String errMsg = result[1].trim();
+          EventQueue.invokeLater(() -> {
+            statusError("Upload failed: " + errMsg);
+            System.err.println("[Arduino] " + errMsg);
+          });
+        } else {
+          EventQueue.invokeLater(() ->
+            statusNotice("StandardFirmata uploaded! You can now run Arduino sketches."));
+        }
+      } catch (Exception e) {
+        EventQueue.invokeLater(() ->
+          statusError("Upload error: " + e.getMessage()));
+      }
+    }, "FirmataUploader").start();
+  }
+
+
+  private String findArduinoCli() {
+    // Check PATH
+    String path = System.getenv("PATH");
+    if (path != null) {
+      for (String dir : path.split(File.pathSeparator)) {
+        File f = new File(dir, "arduino-cli");
+        if (f.exists() && f.canExecute()) return f.getAbsolutePath();
+      }
+    }
+    // Check local install
+    File local = new File(System.getProperty("user.home"),
+      ".processing/arduino-cli/arduino-cli");
+    if (local.exists() && local.canExecute()) return local.getAbsolutePath();
+    return null;
+  }
+
+
+  private String installArduinoCli() {
+    try {
+      statusNotice("Downloading arduino-cli...");
+      String arch = System.getProperty("os.arch").toLowerCase();
+      String platform = (arch.contains("aarch64") || arch.contains("arm")) ?
+        "macOS_ARM64" : "macOS_64bit";
+      String url = String.format(
+        "https://github.com/arduino/arduino-cli/releases/download/v1.1.1/arduino-cli_1.1.1_%s.tar.gz",
+        platform);
+
+      File installDir = new File(System.getProperty("user.home"),
+        ".processing/arduino-cli");
+      installDir.mkdirs();
+
+      File archive = new File(installDir, "arduino-cli.tar.gz");
+
+      // Download
+      ProcessBuilder dl = new ProcessBuilder("curl", "-L", "-o",
+        archive.getAbsolutePath(), url);
+      dl.inheritIO();
+      dl.start().waitFor();
+
+      // Extract
+      ProcessBuilder ex = new ProcessBuilder("tar", "xzf",
+        archive.getAbsolutePath(), "-C", installDir.getAbsolutePath());
+      ex.inheritIO();
+      ex.start().waitFor();
+
+      archive.delete();
+
+      File cli = new File(installDir, "arduino-cli");
+      if (cli.exists()) {
+        cli.setExecutable(true);
+        // Initialize config
+        runArduinoCommand(cli.getAbsolutePath(), "config", "init", "--overwrite");
+        statusNotice("arduino-cli installed.");
+        return cli.getAbsolutePath();
+      }
+    } catch (Exception e) {
+      System.err.println("[Arduino] Install failed: " + e.getMessage());
+    }
+    return null;
+  }
+
+
+  private String findFirmataExample() {
+    String home = System.getProperty("user.home");
+    String[][] candidates = {
+      {home, "Arduino", "libraries", "Firmata", "examples", "StandardFirmata"},
+      {home, "Documents", "Arduino", "libraries", "Firmata", "examples", "StandardFirmata"},
+      {home, ".arduino15", "libraries", "Firmata", "examples", "StandardFirmata"},
+    };
+    for (String[] parts : candidates) {
+      File dir = new File(String.join(File.separator, parts));
+      if (dir.exists() && new File(dir, "StandardFirmata.ino").exists()) {
+        return dir.getAbsolutePath();
+      }
+    }
+    return null;
+  }
+
+
+  /**
+   * Detect the board FQBN using arduino-cli board list.
+   * Falls back to arduino:avr:uno if detection fails.
+   */
+  private String detectBoardFqbn(String cli, String port) {
+    try {
+      String[] result = runArduinoCommandCapture(cli, "board", "list", "--json");
+      String output = result[0];
+
+      // Find our port in the JSON, then search backward for the nearest "fqbn".
+      // JSON structure per detected_port block:
+      //   "matching_boards": [{"fqbn": "..."}], "port": {"address": "/dev/..."}
+      // So "fqbn" comes BEFORE "address" in the same block.
+      String portVariant = port.replace("/dev/cu.", "/dev/tty.");
+      int portIdx = output.indexOf("\"" + port + "\"");
+      if (portIdx < 0) portIdx = output.indexOf("\"" + portVariant + "\"");
+
+      if (portIdx >= 0) {
+        String before = output.substring(0, portIdx);
+        int fqbnIdx = before.lastIndexOf("\"fqbn\"");
+        if (fqbnIdx >= 0) {
+          // Extract the fqbn value: "fqbn": "arduino:avr:mega"
+          int colonIdx = output.indexOf(":", fqbnIdx + 5);
+          int valStart = output.indexOf("\"", colonIdx) + 1;
+          int valEnd = output.indexOf("\"", valStart);
+          if (valStart > 0 && valEnd > valStart) {
+            String fqbn = output.substring(valStart, valEnd);
+            if (fqbn.contains(":")) {
+              System.out.println("[Arduino] Auto-detected board: " + fqbn);
+              return fqbn;
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      System.err.println("[Arduino] Board detection failed: " + e.getMessage());
+    }
+
+    System.out.println("[Arduino] Could not auto-detect board, defaulting to arduino:avr:uno");
+    return "arduino:avr:uno";
+  }
+
+
+  private void runArduinoCommand(String cli, String... args) {
+    try {
+      List<String> cmd = new ArrayList<>();
+      cmd.add(cli);
+      for (String a : args) cmd.add(a);
+      ProcessBuilder pb = new ProcessBuilder(cmd);
+      pb.redirectErrorStream(true);
+      Process p = pb.start();
+      try (BufferedReader reader = new BufferedReader(
+             new InputStreamReader(p.getInputStream()))) {
+        String line;
+        while ((line = reader.readLine()) != null) {
+          System.out.println("[arduino-cli] " + line);
+        }
+      }
+      p.waitFor();
+    } catch (Exception e) {
+      System.err.println("[arduino-cli] " + e.getMessage());
+    }
+  }
+
+
+  private String[] runArduinoCommandCapture(String cli, String... args) {
+    try {
+      List<String> cmd = new ArrayList<>();
+      cmd.add(cli);
+      for (String a : args) cmd.add(a);
+      ProcessBuilder pb = new ProcessBuilder(cmd);
+      Process p = pb.start();
+      StringBuilder stdout = new StringBuilder();
+      StringBuilder stderr = new StringBuilder();
+      try (BufferedReader outR = new BufferedReader(
+             new InputStreamReader(p.getInputStream()));
+           BufferedReader errR = new BufferedReader(
+             new InputStreamReader(p.getErrorStream()))) {
+        String line;
+        while ((line = outR.readLine()) != null) {
+          stdout.append(line).append("\n");
+          System.out.println("[arduino-cli] " + line);
+        }
+        while ((line = errR.readLine()) != null) {
+          stderr.append(line).append("\n");
+        }
+      }
+      p.waitFor();
+      return new String[] { stdout.toString(), stderr.toString() };
+    } catch (Exception e) {
+      return new String[] { "", e.getMessage() };
+    }
+  }
+
+  // ---- End Arduino Integration ----
+
+
   protected void handleLaunch(boolean present, boolean tweak) {
     prepareRun();
     toolbar.activateRun();
@@ -666,6 +1434,11 @@ public class JavaEditor extends Editor {
       debugger.stopDebug();
 
     } else {
+      // Turn off live mode when user explicitly stops
+      if (liveMode) {
+        disableLiveMode();
+      }
+
       toolbar.activateStop();
 
       try {
@@ -687,6 +1460,9 @@ public class JavaEditor extends Editor {
       toolbar.deactivateStop();
       toolbar.deactivateRun();
 
+      // Rebuild toolbar to clear live button state
+      toolbar.repaint();
+
       // focus the PDE again after quitting presentation mode [toxi 030903]
       toFront();
     }
@@ -696,7 +1472,10 @@ public class JavaEditor extends Editor {
   public void onRunnerExiting(Runner runner) {
     synchronized (runtimeLock) {
       if (this.runtime == runner) {
-        deactivateRun();
+        // In live mode, don't deactivate run — we'll relaunch
+        if (!liveMode) {
+          deactivateRun();
+        }
       }
     }
   }
@@ -804,6 +1583,11 @@ public class JavaEditor extends Editor {
   public void sketchChanged() {
     errorChecker.notifySketchChanged();
     preprocService.notifySketchChanged();
+
+    // In live mode, schedule a debounced relaunch (unless suppressed during scrubbing)
+    if (liveMode && !suppressLiveRelaunch) {
+      scheduleLiveRelaunch();
+    }
   }
 
 
@@ -967,6 +1751,10 @@ public class JavaEditor extends Editor {
   @Override
   public void dispose() {
     //System.out.println("window dispose");
+    // Clean up live mode resources
+    disableLiveMode();
+    liveScheduler.shutdownNow();
+
     // quit running debug session
     if (debugger.isEnabled()) {
       debugger.stopDebug();
@@ -1702,6 +2490,11 @@ public class JavaEditor extends Editor {
     }
     if (errorColumn != null) {
       errorColumn.repaint();
+    }
+    // Update variable panel when switching tabs
+    if (liveVariablePanel != null && liveVariablePanel.isVisible()) {
+      liveVariablePanel.setCurrentTab(getSketch().getCurrentCodeIndex());
+      liveVariablePanel.updateVariables();
     }
   }
 

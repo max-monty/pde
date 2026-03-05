@@ -18,4 +18,5 @@ include(
     "java:libraries:pdf",
     "java:libraries:serial",
     "java:libraries:svg",
+    "java:libraries:arduino",
 )

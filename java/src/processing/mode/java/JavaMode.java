@@ -34,7 +34,9 @@ import processing.app.ui.EditorException;
 import processing.app.ui.EditorState;
 
 import processing.utils.SketchException;
+import processing.mode.java.livemode.LiveCodeInjector;
 import processing.mode.java.runner.Runner;
+import processing.mode.java.tweak.Handle;
 import processing.mode.java.tweak.SketchParser;
 
 
@@ -67,7 +69,8 @@ public class JavaMode extends Mode {
       new File(examplesFolder, "Basics"),
       new File(examplesFolder, "Topics"),
       new File(examplesFolder, "Demos"),
-      new File(examplesFolder, "Books")
+      new File(examplesFolder, "Books"),
+      new File(examplesFolder, "Arduino")
     };
   }
 
@@ -176,6 +179,74 @@ public class JavaMode extends Mode {
       return runtime;
     }
     return null;
+  }
+
+
+  /** Start a sketch in live mode with code injection for timeline/variable support */
+  public Runner handleLiveLaunch(Sketch sketch, RunnerListener listener,
+                                 int controlPort, int varPort,
+                                 java.util.List<java.util.List<Handle>> outHandles) throws SketchException {
+    // Save original code before injection
+    String[] originalPrograms = new String[sketch.getCodeCount()];
+    for (int i = 0; i < sketch.getCodeCount(); i++) {
+      originalPrograms[i] = sketch.getCode(i).getProgram();
+    }
+
+    try {
+      // Parse all tweakable numbers in the sketch
+      String[] baseCode = new String[sketch.getCodeCount()];
+      for (int i = 0; i < sketch.getCodeCount(); i++) {
+        baseCode[i] = sketch.getCode(i).getProgram();
+      }
+      SketchParser parser = new SketchParser(baseCode, false);
+      int numInts = 0, numFloats = 0;
+      for (java.util.List<Handle> list : parser.allHandles) {
+        for (Handle h : list) {
+          if ("int".equals(h.type) || "hex".equals(h.type) || "webcolor".equals(h.type)) numInts++;
+          else if ("float".equals(h.type)) numFloats++;
+        }
+      }
+
+      // Replace numeric literals with array references (like automateSketch)
+      SketchCode[] code = sketch.getCode();
+      for (int tab = 0; tab < code.length; tab++) {
+        if (tab >= parser.allHandles.size()) break;
+        int charInc = 0;
+        String c = baseCode[tab];
+        for (Handle n : parser.allHandles.get(tab)) {
+          c = c.substring(0, n.startChar + charInc) + n.name +
+              c.substring(n.endChar + charInc);
+          charInc += n.name.length() - n.strValue.length();
+        }
+        code[tab].setProgram(c);
+      }
+
+      // Inject live mode code (timeline, variables, and tweak server)
+      LiveCodeInjector.inject(code, controlPort, varPort,
+                              numInts, numFloats, parser.allHandles);
+
+      // Return handles to the editor
+      if (outHandles != null) {
+        outHandles.clear();
+        outHandles.addAll(parser.allHandles);
+      }
+
+      // Build the modified code
+      JavaBuild build = new JavaBuild(sketch);
+      String appletClassName = build.build(false);
+
+      if (appletClassName != null) {
+        final Runner runtime = new Runner(build, listener);
+        new Thread(() -> runtime.launch(null)).start();
+        return runtime;
+      }
+      return null;
+    } finally {
+      // Always restore original code so the editor isn't affected
+      for (int i = 0; i < sketch.getCodeCount(); i++) {
+        sketch.getCode(i).setProgram(originalPrograms[i]);
+      }
+    }
   }
 
 

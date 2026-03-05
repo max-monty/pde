@@ -146,6 +146,10 @@ public class PdeTextAreaPainter extends TextAreaPainter {
    */
   protected void paintErrorLine(Graphics gfx, int line, int x) {
     List<Problem> problems = getEditor().findProblems(line);
+    if (problems.isEmpty()) return;
+
+    int y = textArea.lineToY(line) + getLineDisplacement();
+
     for (Problem problem : problems) {
       int lineOffsetStart = textArea.getLineStartOffset(line);
       int lineOffsetStop = textArea.getLineStopOffset(line);
@@ -153,8 +157,6 @@ public class PdeTextAreaPainter extends TextAreaPainter {
       int wiggleStart = lineOffsetStart + problem.getStartOffset();
       int stopOffset = Editor.getProblemEditorLineStop(problem, lineOffsetStart, lineOffsetStop);
       int wiggleStop = lineOffsetStart + stopOffset;
-
-      int y = textArea.lineToY(line) + getLineDisplacement();
 
       try {
         String badCode;
@@ -166,13 +168,7 @@ public class PdeTextAreaPainter extends TextAreaPainter {
             lineOffsetStart,
             wiggleStart - lineOffsetStart
           );
-          //log("paintErrorLine() LineText GC: " + goodCode);
-          //log("paintErrorLine() LineText BC: " + badCode);
         } catch (BadLocationException bl) {
-          // Error in the import statements or end of code.
-          // System.out.print("BL caught. " + ta.getLineCount() + " ,"
-          // + line + " ,");
-          // log((ta.getLineStopOffset(line) - start - 1));
           return;
         }
 
@@ -205,6 +201,7 @@ public class PdeTextAreaPainter extends TextAreaPainter {
         e.printStackTrace();
       }
     }
+
   }
 
 
@@ -324,7 +321,7 @@ public class PdeTextAreaPainter extends TextAreaPainter {
   public String getToolTipText(MouseEvent event) {
     fontMetrics = getFontMetrics();
     int line = event.getY() / fontMetrics.getHeight() + textArea.getFirstLine();
-    if (line >= 0 || line < textArea.getLineCount()) {
+    if (line >= 0 && line < textArea.getLineCount()) {
       List<Problem> problems = getEditor().findProblems(line);
       for (Problem problem : problems) {
         int lineStart = textArea.getLineStartOffset(line);

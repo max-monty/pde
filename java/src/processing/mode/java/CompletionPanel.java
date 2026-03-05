@@ -26,6 +26,7 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Point;
+import java.awt.Rectangle;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
@@ -36,10 +37,14 @@ import javax.swing.DefaultListModel;
 import javax.swing.ImageIcon;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
+import javax.swing.JTextPane;
 import javax.swing.ListSelectionModel;
 import javax.swing.border.EmptyBorder;
+import javax.swing.event.ListSelectionEvent;
+import javax.swing.event.ListSelectionListener;
 
 import processing.app.Base;
 import processing.app.Messages;
@@ -67,6 +72,9 @@ public class CompletionPanel {
 
   /** Scroll pane in which the completion list is displayed */
   final private JScrollPane scrollPane;
+
+  /** Documentation panel shown alongside completions */
+  private JTextPane docPane;
 
   protected JavaEditor editor;
 
@@ -107,11 +115,9 @@ public class CompletionPanel {
     updateTheme();
 
     popupMenu = new JPopupMenu();
-//    popupMenu.setLightWeightPopupEnabled(true);  // doesn't help?
-//    popupMenu.removeAll();  // uh, this is already empty
-    popupMenu.setOpaque(false);  // why? [fry 220803]
-    // setting border null just makes it use the default 2px border
+    popupMenu.setOpaque(false);
     popupMenu.setBorder(new EmptyBorder(0, 0, 0, 0));
+    popupMenu.setLayout(new BorderLayout());
 
     scrollPane = new JScrollPane();
     completionList = new JList<>(items) {
@@ -133,16 +139,64 @@ public class CompletionPanel {
       }
     };
     scrollPane.setViewportView(completionList);
-    // remove an ugly multi-line border around it
     scrollPane.setBorder(null);
 
-    popupMenu.add(scrollPane, BorderLayout.CENTER);
+    // Documentation panel on the right side
+    docPane = new JTextPane();
+    docPane.setContentType("text/html");
+    docPane.setEditable(false);
+    docPane.setFocusable(false);
+    docPane.setBackground(new Color(0xFFF8F8F8));
+    docPane.setBorder(new EmptyBorder(6, 8, 6, 8));
+    JScrollPane docScroll = new JScrollPane(docPane);
+    docScroll.setBorder(javax.swing.BorderFactory.createMatteBorder(0, 1, 0, 0, new Color(0xFFDDDDDD)));
+    docScroll.setPreferredSize(new Dimension(250, 200));
+
+    // Wrapper panel: completion list on left, doc on right
+    JPanel mainPanel = new JPanel(new BorderLayout());
+    mainPanel.add(scrollPane, BorderLayout.CENTER);
+    mainPanel.add(docScroll, BorderLayout.EAST);
+
+    // Listen for selection changes to update docs
+    completionList.addListSelectionListener(e -> {
+      if (!e.getValueIsAdjusting()) {
+        updateDocPanel();
+      }
+    });
+
+    popupMenu.add(mainPanel, BorderLayout.CENTER);
     Dimension pref = completionList.getPreferredSize();
-    popupMenu.setPopupSize(pref.width + classIcon.getIconWidth(),
-                           Math.min(pref.height + 2, MAX_HEIGHT));
-    popupMenu.setFocusable(false);
-    // TODO: Update JavaDoc to completionList.getSelectedValue()
+    int listWidth = Math.max(pref.width + classIcon.getIconWidth(), 200);
+    int docWidth = 250;
+    int popupWidth = listWidth + docWidth;
+    int popupHeight = Math.min(Math.max(pref.height + 2, 150), MAX_HEIGHT);
+
+    // Prevent popup from going off-screen
     JavaTextArea textarea = editor.getJavaTextArea();
+    Point screenLoc = textarea.getLocationOnScreen();
+    java.awt.GraphicsConfiguration gc = textarea.getGraphicsConfiguration();
+    if (gc != null) {
+      Rectangle screenBounds = gc.getBounds();
+      int rightEdge = screenLoc.x + location.x + popupWidth;
+      if (rightEdge > screenBounds.x + screenBounds.width) {
+        // Shift popup left or shrink doc panel
+        int overflow = rightEdge - (screenBounds.x + screenBounds.width);
+        if (overflow < docWidth - 100) {
+          docWidth = docWidth - overflow;
+          docScroll.setPreferredSize(new Dimension(docWidth, 200));
+          popupWidth = listWidth + docWidth;
+        } else {
+          location.x -= overflow;
+        }
+      }
+    }
+
+    popupMenu.setPopupSize(popupWidth, popupHeight);
+    popupMenu.setFocusable(false);
+
+    // Show initial doc for first selected item
+    updateDocPanel();
+
     popupMenu.show(textarea, location.x, textarea.getBaseline(0, 0) + location.y);
     //log("Suggestion shown: " + System.currentTimeMillis());
   }
@@ -349,7 +403,6 @@ public class CompletionPanel {
                                                  .getVerticalScrollBar()
                                                  .getValue()
                                                  - step);
-      // TODO: update JavaDoc to completionList.getSelectedValue()
     }
   }
 
@@ -366,7 +419,6 @@ public class CompletionPanel {
       int index = Math.min(completionList.getSelectedIndex() + 1,
                            completionList.getModel().getSize() - 1);
       selectIndex(index);
-      // TODO: update JavaDoc to completionList.getSelectedValue()
       int step = scrollPane.getVerticalScrollBar().getMaximum() / completionList.getModel().getSize();
       scrollPane.getVerticalScrollBar().setValue(scrollPane.getVerticalScrollBar().getValue() + step);
     }
@@ -375,6 +427,60 @@ public class CompletionPanel {
 
   private void selectIndex(int index) {
     completionList.setSelectedIndex(index);
+  }
+
+
+  /**
+   * Update the documentation panel based on the currently selected completion.
+   */
+  private void updateDocPanel() {
+    if (docPane == null) return;
+    CompletionCandidate selected = completionList.getSelectedValue();
+    if (selected == null) {
+      docPane.setText("");
+      return;
+    }
+    // Look up documentation from ProcessingReference
+    ProcessingReference ref = ProcessingReference.getInstance();
+    ProcessingReference.FunctionDoc doc = ref.getDoc(selected.getElementName());
+    if (doc != null) {
+      docPane.setText(doc.toHtml());
+      docPane.setCaretPosition(0);
+    } else {
+      // Show basic info derived from the candidate's label
+      String name = selected.getElementName();
+      String label = selected.getLabel();
+      // Strip HTML tags for display
+      String cleanLabel = label.replaceAll("<[^>]+>", "").trim();
+      StringBuilder html = new StringBuilder();
+      html.append("<html><body style='font-family:sans-serif;font-size:11px;padding:6px'>");
+      html.append("<div style='font-size:12px;font-weight:bold;color:#333;margin-bottom:6px'>");
+      html.append(name != null ? name : "");
+      html.append("</div>");
+      if (cleanLabel != null && !cleanLabel.equals(name)) {
+        html.append("<div style='color:#666;font-size:10px'>");
+        html.append(cleanLabel);
+        html.append("</div>");
+      }
+      html.append("</body></html>");
+      docPane.setText(html.toString());
+      docPane.setCaretPosition(0);
+    }
+  }
+
+
+  /**
+   * Check if any items in the model have documentation available.
+   */
+  private static boolean hasDocumentation(DefaultListModel<CompletionCandidate> items) {
+    ProcessingReference ref = ProcessingReference.getInstance();
+    for (int i = 0; i < Math.min(items.size(), 20); i++) {
+      CompletionCandidate cc = items.getElementAt(i);
+      if (ref.getDoc(cc.getElementName()) != null) {
+        return true;
+      }
+    }
+    return false;
   }
 
 

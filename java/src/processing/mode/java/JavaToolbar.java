@@ -39,6 +39,8 @@ public class JavaToolbar extends EditorToolbar {
 
   EditorButton stepButton;
   EditorButton continueButton;
+  EditorButton liveButton;
+  EditorButton arduinoButton;
 
 
   public JavaToolbar(Editor editor) {
@@ -130,6 +132,29 @@ public class JavaToolbar extends EditorToolbar {
 
   @Override
   public void addModeButtons(Box box, JLabel label) {
+    liveButton =
+      new EditorButton(this, "/lib/toolbar/live",
+                       "Live Preview") {
+      @Override
+      public void actionPerformed(ActionEvent e) {
+        jeditor.toggleLive();
+        setSelected(jeditor.isLiveMode());
+      }
+    };
+    box.add(liveButton);
+    addGap(box);
+
+    arduinoButton =
+      new EditorButton(this, "/lib/toolbar/arduino",
+                       "Arduino") {
+      @Override
+      public void actionPerformed(ActionEvent e) {
+        jeditor.showArduinoPortMenu(arduinoButton);
+      }
+    };
+    box.add(arduinoButton);
+    addGap(box);
+
     EditorButton debugButton =
       new EditorButton(this, "/lib/toolbar/debug",
                        Language.text("toolbar.debug")) {
@@ -184,6 +209,18 @@ public class JavaToolbar extends EditorToolbar {
 
   protected void deactivateStep() {
     stepButton.setSelected(false);
+    repaint();
+  }
+
+
+  public void setLiveSelected(boolean selected) {
+    liveButton.setSelected(selected);
+    repaint();
+  }
+
+
+  public void setArduinoSelected(boolean selected) {
+    arduinoButton.setSelected(selected);
     repaint();
   }
 }

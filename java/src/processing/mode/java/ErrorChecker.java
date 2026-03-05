@@ -51,7 +51,13 @@ import processing.app.Problem;
 public class ErrorChecker {
   // Delay delivering error check result after last sketch change
   // https://github.com/processing/processing/issues/2677
-  private final static long DELAY_BEFORE_UPDATE = 650;
+  private static final long DEFAULT_DELAY = 650;
+  private volatile long delayBeforeUpdate = DEFAULT_DELAY;
+
+  /** Shorten the debounce delay for faster feedback in live mode. */
+  public void setDelay(long delayMs) {
+    delayBeforeUpdate = delayMs;
+  }
 
   final private ScheduledExecutorService scheduler;
   private volatile ScheduledFuture<?> scheduledUiUpdate = null;
@@ -78,7 +84,7 @@ public class ErrorChecker {
 
 
   public void notifySketchChanged() {
-    nextUiUpdate = System.currentTimeMillis() + DELAY_BEFORE_UPDATE;
+    nextUiUpdate = System.currentTimeMillis() + delayBeforeUpdate;
   }
 
 

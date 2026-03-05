@@ -10116,7 +10116,8 @@ public class PApplet implements PConstants {
     sketch.fullScreen = fullScreen;
 
     sketch.pixelDensity = sketch.displayDensity();
-    sketch.pixelDensityWarning = sketch.pixelDensity > 1;
+    // Don't show pixelDensity warning — it's just noise for students
+    sketch.pixelDensityWarning = false;
 
     // For 3.0.1, moved this above handleSettings() so that loadImage() can be
     // used inside settings(). Sets a terrible precedent, but the alternative

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80">
+  <!-- Board body -->
+  <rect x="16" y="22" width="48" height="36" rx="4" ry="4" fill="#fff" stroke="silver" stroke-width="3"/>
+  <!-- USB connector -->
+  <rect x="12" y="32" width="10" height="16" rx="2" ry="2" fill="#fff" stroke="silver" stroke-width="2"/>
+  <!-- Pin headers top -->
+  <rect x="24" y="18" width="2" height="6" fill="#ff5757"/>
+  <rect x="30" y="18" width="2" height="6" fill="#ff5757"/>
+  <rect x="36" y="18" width="2" height="6" fill="#ff5757"/>
+  <rect x="42" y="18" width="2" height="6" fill="#ff5757"/>
+  <rect x="48" y="18" width="2" height="6" fill="#ff5757"/>
+  <rect x="54" y="18" width="2" height="6" fill="#ff5757"/>
+  <!-- Pin headers bottom -->
+  <rect x="24" y="56" width="2" height="6" fill="#ff5757"/>
+  <rect x="30" y="56" width="2" height="6" fill="#ff5757"/>
+  <rect x="36" y="56" width="2" height="6" fill="#ff5757"/>
+  <rect x="42" y="56" width="2" height="6" fill="#ff5757"/>
+  <rect x="48" y="56" width="2" height="6" fill="#ff5757"/>
+  <rect x="54" y="56" width="2" height="6" fill="#ff5757"/>
+  <!-- Chip -->
+  <rect x="32" y="32" width="16" height="16" rx="1" ry="1" fill="#ff5757"/>
+  <!-- LED indicator -->
+  <circle cx="56" cy="30" r="2.5" fill="#ff5757"/>
+</svg>
