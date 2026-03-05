@@ -35,15 +35,13 @@ class JSerialCommTransport implements TransportInterface {
       throw new IOException("Cannot open port " + port.getSystemPortName());
     }
 
-    // Wait for Arduino to finish resetting after port open triggers DTR.
-    // The bootloader runs for ~1-3 seconds (longer on Mega) before
-    // StandardFirmata starts. Drain any garbage bytes from the bootloader.
+    // Wait for Arduino bootloader to finish after port open triggers DTR reset.
+    // Uno bootloader ~1s, Mega ~1.5s. Then flush any garbage bytes.
     try {
-      Thread.sleep(3000);
+      Thread.sleep(1500);
     } catch (InterruptedException ignored) {
       Thread.currentThread().interrupt();
     }
-    // Flush any bootloader garbage that arrived during the wait
     if (port.bytesAvailable() > 0) {
       byte[] discard = new byte[port.bytesAvailable()];
       port.readBytes(discard, discard.length);

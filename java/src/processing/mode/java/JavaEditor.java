@@ -106,7 +106,7 @@ public class JavaEditor extends Editor {
 
   // Live Preview mode — auto-run sketch on code change
   private volatile boolean liveMode = false;
-  private static final long LIVE_RELAUNCH_DELAY = 500; // ms after last keystroke
+  private static final long LIVE_RELAUNCH_DELAY = 300; // ms after last keystroke
   private final ScheduledExecutorService liveScheduler =
     Executors.newSingleThreadScheduledExecutor(r -> {
       Thread t = new Thread(r, "LivePreview");

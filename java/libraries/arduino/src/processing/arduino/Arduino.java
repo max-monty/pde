@@ -91,8 +91,7 @@ public class Arduino {
       port = BoardDetector.findArduinoPort();
     }
     if (port == null) {
-      System.err.println("[Arduino] No Arduino board detected. " +
-        "Plug in an Arduino running StandardFirmata and restart.");
+      System.err.println("[Arduino] No Arduino detected. Plug in a board and restart.");
       return;
     }
     connect(port);
@@ -130,9 +129,6 @@ public class Arduino {
     this.portName = portName;
     try {
       System.out.println("[Arduino] Connecting to " + portName + "...");
-      System.out.println("[Arduino] The Arduino must be running StandardFirmata firmware.");
-      System.out.println("[Arduino] To upload it: Arduino IDE → File → Examples → Firmata → StandardFirmata");
-      System.out.println("[Arduino] Or use the Processing menu: Debug → Arduino → Upload StandardFirmata");
 
       // Use jSerialComm transport instead of default JSSC (no Apple Silicon support)
       device = new FirmataDevice(new JSerialCommTransport(portName));
@@ -140,14 +136,10 @@ public class Arduino {
       // Set up event listener before starting so we catch the onStart event
       device.addEventListener(new IODeviceEventListener() {
         @Override
-        public void onStart(IOEvent event) {
-          System.out.println("[Arduino] Connected. " +
-            device.getPinsCount() + " pins available.");
-        }
+        public void onStart(IOEvent event) { }
 
         @Override
         public void onStop(IOEvent event) {
-          System.out.println("[Arduino] Disconnected.");
           connected = false;
         }
 
@@ -158,9 +150,7 @@ public class Arduino {
         }
 
         @Override
-        public void onMessageReceive(IOEvent event, String message) {
-          // Handle custom Firmata messages if needed
-        }
+        public void onMessageReceive(IOEvent event, String message) { }
       });
 
       device.start();
@@ -170,23 +160,14 @@ public class Arduino {
       buildAnalogPinMap();
 
       connected = true;
-      System.out.println("[Arduino] Ready on " + portName);
+      System.out.println("[Arduino] Ready on " + portName +
+        " (" + device.getPinsCount() + " pins)");
 
     } catch (Exception e) {
-      System.err.println("[Arduino] Connection failed: " + e.getMessage());
-      System.err.println("[Arduino] -----------------------------------------------");
-      System.err.println("[Arduino] Your Arduino is not running StandardFirmata.");
-      System.err.println("[Arduino] StandardFirmata is required for Processing to");
-      System.err.println("[Arduino] communicate with your Arduino board.");
-      System.err.println("[Arduino] ");
-      System.err.println("[Arduino] To fix this:");
-      System.err.println("[Arduino]   1. Open the Arduino IDE");
-      System.err.println("[Arduino]   2. Go to File → Examples → Firmata → StandardFirmata");
-      System.err.println("[Arduino]   3. Upload it to your board");
-      System.err.println("[Arduino]   4. Come back here and run your sketch again");
-      System.err.println("[Arduino] ");
-      System.err.println("[Arduino] Or in Processing: Debug → Arduino → Upload StandardFirmata");
-      System.err.println("[Arduino] -----------------------------------------------");
+      System.err.println("[Arduino] Connection failed on " + portName +
+        ": " + e.getMessage());
+      System.err.println("[Arduino] Make sure StandardFirmata is uploaded to your board.");
+      System.err.println("[Arduino] Use: Debug → Arduino → Upload StandardFirmata");
       device = null;
     }
   }
@@ -236,7 +217,7 @@ public class Arduino {
       Pin p = device.getPin(pin);
       p.setMode(toFirmataMode(mode));
     } catch (Exception e) {
-      System.err.println("[Arduino] pinMode failed for pin " + pin + ": " + e.getMessage());
+      // Silently ignore — pin may not support the requested mode
     }
   }
 
@@ -272,7 +253,7 @@ public class Arduino {
       }
       p.setValue(value);
     } catch (Exception e) {
-      System.err.println("[Arduino] digitalWrite failed: " + e.getMessage());
+      // Silently ignore write errors during normal operation
     }
   }
 
@@ -313,7 +294,7 @@ public class Arduino {
       }
       p.setValue(value);
     } catch (Exception e) {
-      System.err.println("[Arduino] analogWrite failed: " + e.getMessage());
+      // Silently ignore write errors during normal operation
     }
   }
 
@@ -333,7 +314,7 @@ public class Arduino {
       }
       p.setValue(Math.max(0, Math.min(180, angle)));
     } catch (Exception e) {
-      System.err.println("[Arduino] servoWrite failed: " + e.getMessage());
+      // Silently ignore write errors during normal operation
     }
   }
 
